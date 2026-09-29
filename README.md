@@ -22,9 +22,9 @@ go run ./cmd/match-maker --players 60 --seed 3
 
 ## 现在的行为
 
-- `Build` 用 `average(A) - average(B)` 做门槛，两队平均分接近但队内差距可以很大。
-- `teamViolations` 只对 A 队调用，B 队职业重复照样出局。
-- 放宽逻辑是 `limit += widenStep` 只执行一次，等待 5 分钟与等待 40 秒没区别。
+- `Build` 先按 MMR 与名字稳定排序，每 6 人一局、A/B 交替分组，门槛是两队的同队最大分差。
+- `teamViolations` 对 A、B 两队都校验「恰好 1 坦克、1 治疗、1 输出」，不合格的队伍计入 `role_violations`。
+- 放宽逻辑按组内最长等待逐级计算：超过 `widenAfter` 秒后每多等 10 秒上限加 `widenStep`。
 
 ## 计划新增的能力
 
@@ -36,9 +36,11 @@ go run ./cmd/match-maker --players 60 --seed 3
 ## 输出
 
 ```
-players=60 matched=9 teams=18
-max_gap=334 role_violations=9
+players=60 matched=8 teams=16
+max_gap=251 role_violations=12
 ```
+
+`max_gap` 不超过 `max-average-gap` 或按等待时长放宽后的上限。
 
 ## 目录
 
