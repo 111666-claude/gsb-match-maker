@@ -1,6 +1,8 @@
 // Package matchmaker 排队匹配：把队列里的玩家凑成 6 人一局、两队各 3 人。
-// 缺陷：分差按「两队平均分」比较（不看同队最大分差）；超时放宽是固定值；只检查 A 队的职业。
+// 口径：同队最大分差是硬门槛；两队职业都校验；超时放宽随等待时长逐级递增。
 package matchmaker
+
+import "sort"
 
 // Player 是排队中的玩家。
 type Player struct {
@@ -16,17 +18,6 @@ type Game struct {
 	B          []Player
 	MaxGap     int
 	Violations int
-}
-
-func average(team []Player) int {
-	if len(team) == 0 {
-		return 0
-	}
-	total := 0
-	for _, player := range team {
-		total += player.MMR
-	}
-	return total / len(team)
 }
 
 func teamGap(team []Player) int {
@@ -45,37 +36,58 @@ func teamGap(team []Player) int {
 	return high - low
 }
 
-// teamViolations 缺陷：只数坦克，完全不管治疗与输出。
+// teamViolations 每队必须恰好 1 坦克、1 治疗、1 输出，违反记 1。
 func teamViolations(team []Player) int {
 	if len(team) != 3 {
 		return 1
 	}
-	tanks := 0
+	tanks, healers, damage := 0, 0, 0
 	for _, player := range team {
-		if player.Role == "tank" {
+		switch player.Role {
+		case "tank":
 			tanks++
+		case "healer":
+			healers++
+		case "dps":
+			damage++
 		}
 	}
-	if tanks != 1 {
+	if tanks != 1 || healers != 1 || damage != 1 {
 		return 1
 	}
 	return 0
 }
 
-// Build 缺陷：按 MMR 排序后每 6 人一局、A/B 交替分组，只比两队平均分；
-// 职业约束只查 A 队；超时放宽写死成「等待超过 widenAfter 秒就一律放宽 widenStep」。
+// widenLimit 等待超过 widenAfter 秒后，每多等 10 秒把分差上限放宽 widenStep，
+// 随等待时长递增，不是一次性放宽。
+func widenLimit(maxAverageGap, widenAfter, widenStep, wait int) int {
+	if wait <= widenAfter {
+		return maxAverageGap
+	}
+	return maxAverageGap + widenStep*((wait-widenAfter)/10)
+}
+
+// Build 按 MMR（同分按名字）稳定排序后每 6 人一局、A/B 交替分组；
+// 门槛是同队最大分差（max(MMR)-min(MMR)），两队都要过；
+// 两队职业都计入 Violations；放宽上限随组内最长等待逐级递增。
 func Build(players []Player, maxAverageGap int, widenAfter int, widenStep int) []Game {
-	// 缺陷：直接按到达顺序分组，不看 MMR 远近
 	sorted := append([]Player(nil), players...)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		if sorted[i].MMR != sorted[j].MMR {
+			return sorted[i].MMR < sorted[j].MMR
+		}
+		return sorted[i].Name < sorted[j].Name
+	})
 	games := []Game{}
-	limit := maxAverageGap
-	widened := false
 	for index := 0; index+6 <= len(sorted); index += 6 {
 		group := sorted[index : index+6]
-		if !widened && group[5].Wait > widenAfter {
-			limit += widenStep // 缺陷：一次性放宽，不随等待时长递增
-			widened = true
+		wait := 0
+		for _, player := range group {
+			if player.Wait > wait {
+				wait = player.Wait
+			}
 		}
+		limit := widenLimit(maxAverageGap, widenAfter, widenStep, wait)
 		game := Game{A: []Player{}, B: []Player{}}
 		for position, player := range group {
 			if position%2 == 0 {
@@ -84,8 +96,8 @@ func Build(players []Player, maxAverageGap int, widenAfter int, widenStep int) [
 				game.B = append(game.B, player)
 			}
 		}
-		if gap := average(game.A) - average(game.B); gap > limit || -gap > limit {
-			continue // 缺陷：用平均分差做门槛
+		if teamGap(game.A) > limit || teamGap(game.B) > limit {
+			continue // 同队最大分差超过当前上限，整组留队列
 		}
 		game.MaxGap = teamGap(game.A)
 		if other := teamGap(game.B); other > game.MaxGap {
